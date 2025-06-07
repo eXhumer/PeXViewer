@@ -1,0 +1,127 @@
+name: App build
+
+on:
+  push:
+    branches: [ vite ]
+    tags: [ '*' ]
+  pull_request:
+    branches: [ vite ]
+  workflow_dispatch:
+
+jobs:
+  build_with_signing:
+    strategy:
+      matrix:
+        image: [
+          {platform: darwin, arch: arm64, python: '3.13'},
+          {platform: darwin, arch: universal, python: '3.13'},
+          {platform: darwin, arch: x64, python: '3.13'},
+          {platform: linux, arch: x64},
+          {platform: win32, arch: ia32, python: '3.13'},
+          {platform: win32, arch: x64, python: '3.13'}
+        ]
+        node: [24]
+
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # https://docs.github.com/en/actions/use-cases-and-examples/deploying/installing-an-apple-certificate-on-macos-runners-for-xcode-development
+      - name: Install the Apple certificate and provisioning profile
+        if: ${{ matrix.image.platform == 'darwin' }}
+        env:
+          BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
+          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          # create variables
+          CERTIFICATE_PATH=$RUNNER_TEMP/build_certificate.p12
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+
+          # import certificate and provisioning profile from secrets
+          echo -n "$BUILD_CERTIFICATE_BASE64" | base64 --decode -o $CERTIFICATE_PATH
+
+          # create temporary keychain
+          security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 600 $KEYCHAIN_PATH
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+
+          # import certificate to keychain
+          security import $CERTIFICATE_PATH -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security list-keychain -d user -s $KEYCHAIN_PATH
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: 'npm'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.image.python }}
+          check-latest: true
+          cache: 'pip'
+        if: ${{ matrix.image.platform != 'linux' }}
+
+      - name: Install Python dependencies
+        run: python3 -m pip install setuptools
+        if: ${{ matrix.image.platform == 'darwin' }}
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Build package (macOS)
+        if: ${{ matrix.image.platform == 'darwin' }}
+        env:
+          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          CASTLABS_EVS_PASSWORD: ${{ secrets.CASTLABS_EVS_PASSWORD }}
+          CASTLABS_EVS_USERNAME: ${{ secrets.CASTLABS_EVS_USERNAME }}
+        run: |
+          echo "::add-mask::${{ secrets.DEVELOPER_NAME }}"
+          npm run make -- --platform ${{ matrix.image.platform }} --arch ${{ matrix.image.arch }}
+
+      - name: Build package
+        if: ${{ matrix.image.platform != 'darwin' }}
+        shell: 'bash'
+        env:
+          CASTLABS_EVS_USERNAME: ${{ secrets.CASTLABS_EVS_USERNAME }}
+          CASTLABS_EVS_PASSWORD: ${{ secrets.CASTLABS_EVS_PASSWORD }}
+        run: |
+          npm run package -- --platform ${{ matrix.image.platform }} --arch ${{ matrix.image.arch }}
+
+      - name: Upload package (Linux / Windows)
+        if: ${{ matrix.image.platform != 'darwin' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: eXViewer-${{ matrix.image.platform }}-${{ matrix.image.arch }}
+          path: out/eXViewer-${{ matrix.image.platform }}-${{ matrix.image.arch }}/
+          if-no-files-found: error
+          compression-level: 9
+
+      - name: Upload package (macOS)
+        if: ${{ matrix.image.platform == 'darwin' }}
+        uses: eXhumer/upload-artifact@0b7d5f5684d3f642f978d2faad9ade64f5b4dd57
+        with:
+          name: eXViewer-${{ matrix.image.platform }}-${{ matrix.image.arch }}
+          path: out/eXViewer-${{ matrix.image.platform }}-${{ matrix.image.arch }}/
+          follow-symlinks: false
+          if-no-files-found: error
+          compression-level: 9
+
+      - name: Upload installer (macOS)
+        if: ${{ matrix.image.platform == 'darwin' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: eXViewer-${{ matrix.image.platform }}-${{ matrix.image.arch }}-Installer
+          path: out/make/*.dmg
+          if-no-files-found: error
+          compression-level: 9
